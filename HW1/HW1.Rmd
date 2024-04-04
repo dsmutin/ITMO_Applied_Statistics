@@ -1,0 +1,474 @@
+---
+title: "HW1"
+author: "D.Smutin"
+date: "2024-04-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(base.dir = "~/bioinformatics/ITMO/statistics/multivar/")
+
+library(tidyverse)
+library(vegan)
+library(ggpubr)
+library(viridis)
+library(plotly)
+library(ggbeeswarm)
+library(ggvegan)
+set.seed(1)
+```
+
+# Homework 1 by Smutin Daniil
+
+## Prepare data
+```{r}
+data("BCI")
+data("BCI.env")
+BCI
+```
+## Description from package
+A data frame with 50 plots (rows) of 1 hectare with counts of trees on each plot with total of 225 species (columns). Full Latin names are used for tree species. The names were updated against http://www.theplantlist.org and Kress et al. (2009) which allows matching 207 of species against doi: 10.5061/dryad.63q27 (Zanne et al., 2014).
+
+# EDA
+## Metadata analysis
+```{r}
+BCI.env %>% str
+```
+```{r}
+unique(paste(BCI.env$UTM.EW, BCI.env$UTM.NS))
+```
+All positions are unique. Lets draw tham:
+```{r}
+BCI.env %>%
+  ggplot(aes(UTM.EW, UTM.NS, color = 1:50)) + 
+  geom_point() +
+  theme_minimal() +
+  scale_color_viridis("ID")
+```
+```{r}
+cat("Precipitation: ", unique(BCI.env$Precipitation), "\n")
+cat("Elevation: ", unique(BCI.env$Elevation), "\n")
+cat("Age.cat: ", unique(BCI.env$Age.cat), "\n")
+cat("Geology: ", unique(BCI.env$Geology), "\n")
+cat("Habitat: ", unique(BCI.env$Habitat), "\n")
+cat("Stream: ", unique(BCI.env$Stream), "\n")
+cat("EnvHet: ", unique(BCI.env$EnvHet), "\n")
+```
+Precipitation, elevation and geology is the same for all samples. So it is worth to exclude them
+```{r}
+BCI.env <- BCI.env[,-c(3,4,6)]
+```
+Visualize all other distributions:
+```{r, echo = F}
+g0 <- ggplot(BCI.env) + theme_minimal() + ylab("")
+
+g1 <- g0 + geom_histogram(aes(Age.cat), stat="count", show.legend = F, fill = "cadetblue")
+g2 <- g0 + geom_histogram(aes(Habitat), stat="count", show.legend = F, fill = "cadetblue")
+g3 <- g0 + geom_histogram(aes(Stream), stat="count", show.legend = F, fill = "cadetblue")
+g4 <- g0 + geom_density(aes(EnvHet), show.legend = F) + 
+  geom_histogram(aes(EnvHet), show.legend = F, fill = "cadetblue")
+
+
+ggarrange(g1, g2, g3, g4,
+          ncol = 2, nrow = 2)
+```
+Most of samples (49 out of 50) have age category c3. So it might be worth to exclude one with age category c2 to reduce the noise in samples when performing statistical transformations in future
+```{r}
+#rmV <- which(BCI.env$Age.cat == "c2")
+#BCI.env <- BCI.env[-rmV,]
+#BCI <- BCI[-rmV,]
+```
+
+How independent are Stream,Habitat and EnvHet?
+```{r}
+BCI.env %>%
+  ggplot(aes(y = EnvHet, "", color = EnvHet)) +
+  geom_beeswarm() +
+  facet_grid(Stream~Habitat) +
+  theme_minimal() +
+  scale_color_viridis(direction = -1) +
+  ylab("amount") + xlab("")
+```
+There is no samples with stream presence and several habitat parameters. Also, there is lack of swamp and young habitat samples.
+
+## Making tidy table
+```{r}
+df <- BCI %>%
+  rownames_to_column("id") %>%
+  pivot_longer(cols = 2:226) %>%
+  as_tibble() %>%
+  mutate_at("value", as.numeric) %>%
+  mutate_at(c("id", "name"), as.factor) %>%
+  left_join(
+    BCI.env %>%
+      rownames_to_column("id"),
+    by = "id")
+  
+
+df$id <- fct_inseq(df$id)
+```
+
+## Sample analysis
+```{r}
+df %>%
+  ggplot(aes(y = id, log10(value+1), fill = id)) +
+  geom_boxplot(show.legend = F, linewidth = 0.1, outliers = F) +
+  geom_jitter(show.legend = F, size = 0.1, alpha = 0.1) +
+  scale_fill_viridis_d() +
+  theme_minimal()
+```
+Most of values are 0 or 1, so first of all lets check the amount of species per sample
+```{r}
+df %>%
+  mutate("pres" = (value > 0)/225) %>%
+  summarise(pres = sum(pres), .by = c(UTM.EW, UTM.NS)) %>%
+  ggplot(aes(x = UTM.EW, y = UTM.NS, fill = pres)) +
+  geom_tile() +
+  scale_fill_viridis("% of all species presented", direction = -1) +
+  theme_minimal()
+```
+All samples are pretty consistent by amount of different species in each of them. And how about overall amount of trees?
+
+```{r}
+df %>%
+  summarise(N = sum(value), .by = c(UTM.EW, UTM.NS)) %>%
+  ggplot(aes(x = UTM.EW, y = UTM.NS, fill = N)) +
+  geom_tile() +
+  scale_fill_viridis("trees", direction = -1) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+What is the variance behind this values?
+```{r}
+g1 <- df %>%
+  summarise(N = sum(value), .by = c(UTM.EW, UTM.NS)) %>%
+  ggplot(aes(x = N)) +
+  geom_density() +
+  xlab("number of trees") + ylab("density") +
+  scale_fill_viridis() +
+  theme_minimal()
+
+g2 <- df %>%
+  mutate("pres" = (value > 0)/225) %>%
+  summarise(pres = sum(pres), .by = c(UTM.EW, UTM.NS)) %>%
+  ggplot(aes(x = pres)) +
+  geom_density() +
+  xlab("presence of trees") + ylab("") +
+  scale_fill_viridis() +
+  theme_minimal()
+
+ggarrange(g1, g2, nrow = 1)
+```
+All samples are pretty normal by trees overall presence, but one sample is with excepted amount of trees. Lets explore it:
+```{r}
+tmp <- df %>% 
+  summarise(N = sum(value), .by = id)
+
+tmp <- tmp$id[tmp$N > 550] %>% as.character
+top <- df[df$id == tmp, c("value", "name")]
+top <- top$name[order(top$value, decreasing = T)][1:20]
+
+df %>%
+  summarise(value = mean(value), id = "mean", .by = name) %>%
+  rbind(df[df$id == tmp, c("value", "name", "id")]) %>%
+  subset(name %in% top) %>%
+  ggplot(aes(value, fct_reorder(name,value), fill = id)) +
+  geom_col(position = "dodge") +
+  theme_minimal() + ylab("species")
+```
+The biggest differences occurce because of exceptionally high level of Gustavia superba and Alsesis blackania. It is better to remove this sample in future Q-mode analysis
+
+BTW, while adjusting nice legend I suddenly revealed a true masterpiece
+```{r}
+df %>%
+  summarise(N = sum(value), .by = c(UTM.EW, UTM.NS)) %>%
+  ggplot(aes(x = N, color = N)) +
+  geom_segment(aes(yend = 0, xend = ..density..), stat = "density") +
+  xlab("density") + ylab("") +
+  scale_fill_viridis() +
+  theme_minimal()
+```
+
+We can see that in the center there are less trees, than on the north east periphery. The amount of trees does not seems to correlate to their diversity. 
+
+So, in this way I perform some R-mode analysis. And what about Q-mode analysis? Is it better to use normalized data for the process? Possible yes, but let's check it
+
+## Species analysis
+```{r}
+sum_sample <- df %>% summarise(total = sum(value), .by = c(id))
+
+df <- df %>%
+  left_join(sum_sample, by = "id") %>%
+  mutate("am" = value/total)
+```
+
+Let's check, what is better to use in further standartization process
+```{r}
+sum_tree1 <- df %>% summarise(mt = mean(value), 
+                              st = sd(value),
+                              .by = c(name))
+
+sum_tree2 <- df %>% summarise(mt = mean(am), 
+                              st = sd(am),
+                              .by = c(name))
+```
+
+### Mean visualization
+Standardized using absolute value
+```{r}
+sum_tree <- sum_tree1[order(sum_tree1$mt),]
+sum_tree$name <- fct_inorder(sum_tree$name)
+
+sum_tree %>%
+  mutate(vmax = mt + st) %>%
+  mutate(vmin = ifelse(mt - st > 0, mt - st, 0)) %>%
+  ggplot(aes(y = name, mt, color = name, text = name)) +
+  geom_pointrange(aes(xmin = vmin, xmax = vmax), 
+                  show.legend = F, size = 0.1, alpha = 0.2) +
+  theme_minimal() +
+  ylab("species") +
+  theme(panel.grid.minor.y = element_blank(),
+        panel.grid.major.y = element_blank(),
+        axis.text.y = element_blank()) +
+  scale_color_viridis_d(direction = -1) +
+  xlab("number")
+```
+
+Standardized using relative amount in sample
+```{r}
+sum_tree <- sum_tree2[order(sum_tree2$mt),]
+sum_tree$name <- fct_inorder(sum_tree$name)
+
+sum_tree %>%
+  mutate(vmax = mt + st) %>%
+  mutate(vmin = ifelse(mt - st > 0, mt - st, 0)) %>%
+  ggplot(aes(y = name, mt, color = name, text = name)) +
+  geom_pointrange(aes(xmin = vmin, xmax = vmax), 
+                  show.legend = F, size = 0.1, alpha = 0.2) +
+  theme_minimal() +
+  ylab("species") +
+  theme(panel.grid.minor.y = element_blank(),
+        panel.grid.major.y = element_blank(),
+        axis.text.y = element_blank()) +
+  scale_color_viridis_d(direction = -1) +
+  xlab("amount")
+```
+
+Using absolute values might be slightly better
+
+### Values vizualization
+Is the real values normally distribured across all species?
+```{r}
+df <- df %>%
+  left_join(sum_tree1, by = "name")
+
+ggplot(df, aes(am)) +
+  geom_jitter(aes(color = mt, y = 200), height = 200, size = 0.1) +
+  geom_density(color = "red") +
+  scale_color_viridis("mean per species", direction = -1) +
+  theme_minimal() +
+  ylab("density")
+```
+
+I can't hold on beyond using beeswarm here)
+
+```{r}
+ggplot(df[df$value!=0,], aes(am, y = "", color = name)) +
+  geom_beeswarm(show.legend = F, size = 0.2) +
+  theme_minimal() +
+  scale_color_viridis_d()
+```
+
+One really bad outlier with the exceptional amount of one tree (35) might not be used in further sample analysis, as well as the 33rd sample with c2
+
+## Full analysis
+Let's check independence of influencing factors:
+
+```{r}
+ggplot(df[df$am!=0,], aes(y = am, "", color = EnvHet)) +
+  geom_beeswarm(size = 0.5, alpha = 0.5) +
+  facet_grid(Stream~Habitat) +
+  theme_minimal() +
+  scale_color_viridis(direction = -1) +
+  ylab("amount") + xlab("")
+```
+
+Seems that for further Q-mode analysis is also better to exclude all young samples because of outliers. Also, swamp, young habitats and samples with presence of stream have high environmental heterogenity. So, env.het is a type of habitat measure..
+
+Let's move on!
+
+# NMDS
+Let's use Bray-Curtis distance
+```{r}
+NMDS <- metaMDS(BCI, k = 2, dist = "bray", autotransform = FALSE)
+```
+```{r}
+stressplot(NMDS)
+```
+A lot of data, so looks good
+## Plain
+```{r}
+ordiplot(NMDS,type = "n")
+orditorp(NMDS, display="species", labels = " ", col = "#00297a70", cex = 0.2, pch = 1)
+orditorp(NMDS, display="sites",labels = " ",col = "#007a3270", cex = 0.2, pch = 10)
+```
+## Add legend
+
+### Env.Het
+```{r}
+ordiplot(NMDS,type = "n")
+ordisurf(NMDS,BCI.env$EnvHet,main="",col="forestgreen", cex = 0.2)
+orditorp(NMDS, display="species", labels = " ", col = "#00297a70", cex = 0.1, pch = 1)
+```
+### Stream
+```{r}
+tmp <- BCI.env$Stream %>% factor
+cols <- match(tmp, levels(tmp), 1:length(levels(tmp)))
+
+ordiplot(NMDS,type = "n")
+ordiellipse(NMDS,BCI.env$Stream,main="",cex = 0.2, col = c("darkgreen", "darkred"))
+orditorp(NMDS, display="sites",labels = " ",col = cols, cex = 0.2, pch = 10)
+```
+Stream presented samples are on the periphery of the NMDS, but does not form special group
+
+### Habitat
+```{r}
+tmp <- BCI.env$Habitat %>% factor
+cols <- match(tmp, levels(tmp), 1:length(levels(tmp)))
+
+ordiplot(NMDS,type = "n")
+ordiellipse(NMDS,BCI.env$Habitat,main="",cex = 0.2, col = c("darkgreen", "darkred"))
+```
+Habitats vary a little, so we can see there the influence of this factor.
+
+```{r}
+NMDS_sm <- data.frame(BCI.env, scores(NMDS, display = "sites"))
+NMDS_sp <- data.frame(scores(NMDS, display = "species"))
+```
+ggplot2 
+```{r}
+g1 <-  ggplot() +
+  geom_point(data = NMDS_sm, aes (x = NMDS1, y = NMDS2, text = 1:50,
+             colour = Habitat, shape = Stream, size = EnvHet), alpha = 0.5) +
+  theme_minimal() +
+  scale_color_viridis_d()
+
+g1
+#ggplotly(g1)
+```
+Seems like 3 clusters (or 2 with outliers) with unknown properties.
+
+What about species? Let's annotate them by presence in samples
+```{r}
+pres <- df %>%
+  summarise(presence = sum(value > 0)/50, .by = name)
+
+g2 <- NMDS_sp %>%
+  rownames_to_column("name") %>%
+  left_join(pres, by = "name") %>%
+  ggplot(aes(x = NMDS1, y = NMDS2, text = name, color = presence)) +
+  geom_point(alpha = 0.5, size = 0.7) +
+  theme_minimal() +
+  scale_color_viridis("presence", direction = -1)
+  
+ggplotly(g2)
+```
+As it could be predicted, low frequency trees are outliers on NMDS
+
+## Adding environmental parameters
+```{r}
+ef <- envfit(NMDS, BCI.env)
+ef$vectors %>% print
+cat("----\n")
+ef$factors %>% print
+```
+
+Habitat fits awesome the differences in data, while other parameters seems to be not correlated with samples tree amounts. Interestingly, horizontal axis UTM.EW also influence on sample properties.
+
+Visualization:
+```{r}
+env <- BCI.env
+env[,3:5] <- env[,3:5] %>% sapply(match,
+                                  env[,3:5] %>% unlist %>% factor %>% levels,
+                                  1:9)
+
+par(mfrow = c(2, 3))
+o1 <- ordisurf(NMDS, env$UTM.EW, method = "REML")
+o2 <- ordisurf(NMDS, env$UTM.NS, method = "REML")
+o3 <- ordisurf(NMDS, env$Habitat, method = "REML")
+o4 <- ordisurf(NMDS, env$Stream, method = "REML")
+o5 <- ordisurf(NMDS, env$EnvHet, method = "REML")
+par(mfrow = c(1, 1))
+```
+1st NMDS axis is mostly UTM.EW, while 2nd is mostly Habitat explained.
+
+```{r}
+cat("UTM.EW:")
+o1 %>% summary %>% print
+cat("\n#########################\n\n")
+cat("Habitat:")
+o3 %>% summary %>% print
+```
+Fortifying objects:
+```{r}
+NMDS_ef <- fortify(ef)
+
+fortify_ordisurf <- function(model) {
+  xy <- expand.grid(x = model$grid$x, y = model$grid$y)
+  xyz <- cbind(xy, c(model$grid$z))
+  names(xyz) <- c("x", "y", "z")
+  return(na.omit(xyz))
+}
+
+NMDS_os_EW <- fortify_ordisurf(o1)
+NMDS_os_Habitat <- fortify_ordisurf(o3)
+```
+
+Let's check real features correlation
+```{r}
+g1 <- NMDS_sm %>%
+  ggplot(aes(UTM.EW, NMDS2, color = NMDS1)) +
+  geom_smooth(alpha = 0.1, color = "red", linetype = 2, method = "lm") +
+  geom_point() +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  scale_color_viridis("NMDS1")
+
+g2 <- NMDS_sm %>%
+  ggplot(aes(Habitat, NMDS1, color = NMDS2)) +
+  geom_boxplot(alpha = 0.1, aes(fill = Habitat), show.legend = F) +
+  geom_beeswarm() +
+  theme_minimal() +
+  scale_color_viridis("NMDS2") +
+  theme(legend.position = "bottom") +
+  scale_fill_viridis_d()
+
+ggarrange(g1,g2, nrow = 1)
+
+```
+Plots can say more than me)
+
+Visualize altogether
+```{r}
+gg <- ggplot() +
+  geom_point(data = NMDS_sm, 
+             aes (x = NMDS1, y = NMDS2, 
+             shape = Habitat), alpha = 0.5) +
+  stat_contour(data = NMDS_os_EW, aes(x = x, y = y, z = z, colour = ..level..)) +
+  geom_segment(data = NMDS_ef[6:10,],
+               colour = "blue", size = 0.5, linewidth = 0.25,
+               aes(x = 0, xend = NMDS1, y = 0, yend = NMDS2, text = label),
+               arrow = arrow(length = unit(0.25, "cm"))) +
+  labs(x = "NMDS1", y = "NMDS2") +
+  theme_minimal() +
+  scale_color_viridis("Coordinate, western") +
+  coord_fixed()
+
+ggplotly(gg)
+```
+Now we can finally postulate presence of 3 samples groups: western OldLow+OldSlope groups, OldHigh + central and eastern OldLow+OldSlope, and swamp+outliers.
+
+
+So, the main features, influencing on samples are habitat and their eastern-western position.
