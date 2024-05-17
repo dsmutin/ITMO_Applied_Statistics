@@ -1,0 +1,257 @@
+---
+title: "HW2"
+author: "D.Smutin"
+date: "2024-04-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(base.dir = "~/bioinformatics/ITMO/statistics/multivar/HW2/")
+
+library(tidyverse)
+library(vegan)
+library(ggpubr)
+library(viridis)
+library(plotly)
+library(ggbeeswarm)
+library(ggvegan)
+library(golubEsets)
+library(ggdendro)
+library(pvclust)
+
+set.seed(1)
+```
+
+# Homework 2 by Smutin Daniil
+
+## Prepare data
+```{r}
+data(Golub_Merge)
+df <- data.frame(Golub_Merge)[1:7129] %>% 
+  decostand(method="log", MARGIN = 2)
+df_rows <- rownames(df) %>% as.numeric()
+
+#group vector to check
+env <- Golub_Merge$ALL.AML
+env1 <- Golub_Merge$T.B.cell
+col1 <- c("red", "blue")[env %>% match(unique(env))]
+col2 <- c("green", "violet")[env1 %>% match(unique(env1))]
+env
+```
+
+A little bit normalization would be better, but data looks wierd to be honest, and pre-normalized
+
+```{r}
+df_var <- (df %>% apply(2, sd)) / abs(df %>% apply(2, mean))
+df_var <- log10(df_var + 1)
+
+ggplot() +
+  geom_density(aes(df_var)) +
+  geom_boxplot(aes(df_var, 0), outliers = F) +
+  geom_vline(aes(xintercept = .15), color = "red") +
+  geom_vline(aes(xintercept = .15), color = "red") +
+  xlab("log 10 of sd / mean of the data") +
+  theme_minimal()
+```
+This step does not make any difference, except faster working script
+```{r}
+#df <- df[, df_var > .4]
+```
+
+
+## Clustering
+```{r}
+dist_mtd <- c("euclidean", "maximum", "manhattan", 
+              "canberra", "binary", "minkowski")
+
+dist_list <- list()
+
+heatmap_custom <- function(dist_mat, mtd) {
+  dist_mat %>% 
+    as.matrix %>% 
+    heatmap(ColSideColors = col1, 
+            RowSideColors = col2,
+            main = mtd,
+            scale = "none")
+}
+
+for (i in 1:length(dist_mtd)){
+  dist_list[[i]] <- df %>% dist(method = dist_mtd[i])
+  heatmap_custom(dist_list[[i]], dist_mtd[i])
+} 
+```
+
+```{r}
+clust <- function (DM, mtd) {
+  DM %>% hclust(method = mtd)
+}
+wrap_clust <- function (DM, mtd) {
+  cop_clust <- DM %>% clust(mtd) %>% cophenetic()
+  c(mtd, cor(DM, cop_clust))
+}
+
+
+
+clust_mtd <- c(
+  "ward.D", "ward.D2", "single", "complete", 
+  "average", "mcquitty", "median", "centroid"
+)
+
+clust_list <- data.frame("dist"=NA, "clust"=NA, "cof"=NA)
+for (i in clust_mtd) {
+  for (j in 1:length(dist_mtd)) {
+    clust_list <- rbind (clust_list,
+                         c(dist_mtd[j], wrap_clust(dist_list[[j]], i)))
+  }
+}
+
+clust_list <- clust_list[-1,] %>% 
+  mutate(cof = as.numeric(cof))
+
+gg <-  ggplot() +
+  geom_point(data = clust_list, 
+             aes(dist, clust, 
+                 size = cof, color = cof), show.legend = F) +
+  geom_text(data = clust_list %>% subset(cof > 0.8),
+            aes(dist, clust, 
+                label = round(cof, 2)),
+            size = 2, color = "white") +
+  scale_color_viridis_c("Cophenetic correlation", direction = -1) +
+  scale_size_continuous("Cophenetic correlation") +
+  theme_minimal()
+
+ggplotly(gg)%>%
+  style(showlegend = FALSE)
+
+```
+
+### Best cluster
+We have a lot of good cluster variants. Let's check several
+
+We can see a lot of clusters with not very big differences between groups, maybe there is another clustering feature.
+
+```{r}
+gg <- df %>% 
+  dist(method = "maximum") %>% 
+  hclust(method = "centroid") 
+
+xpos <- gg$labels %>% as.numeric 
+cols2 <- env[xpos%>% match(1:72)]
+shps2 <- env1[xpos%>% match(1:72)] %>% as.character
+shps2[is.na(shps2)] <- ""
+col_tmp <- data.frame(x = xpos, y = -.00003, col = cols2, shape = shps2)
+
+gg %>% 
+  as.dendrogram() %>% 
+  dendro_data %>% 
+  segment %>% 
+  ggplot() +
+  geom_segment(aes(x=x, y=y, xend=xend, yend=yend)) +
+  geom_point(data = col_tmp, aes(x, y, color = col, shape = shape), size = .9) +
+  theme_dendro() +
+  scale_color_viridis_d(name = "Type") +
+  scale_shape_discrete(name = "Cell")
+```
+
+```{r}
+gg <- df %>% 
+  dist(method = "binary") %>% 
+  hclust(method = "average") 
+
+xpos <- gg$labels %>% as.numeric 
+cols2 <- env[xpos%>% match(1:72)]
+shps2 <- env1[xpos%>% match(1:72)] %>% as.character
+shps2[is.na(shps2)] <- ""
+col_tmp <- data.frame(x = xpos, y = -.00003, col = cols2, shape = shps2)
+
+gg %>% 
+  as.dendrogram() %>% 
+  dendro_data %>% 
+  segment %>% 
+  ggplot() +
+  geom_segment(aes(x=x, y=y, xend=xend, yend=yend)) +
+  geom_point(data = col_tmp, aes(x, y, color = col, shape = shape), size = .9) +
+  theme_dendro() +
+  scale_color_viridis_d(name = "Type") +
+  scale_shape_discrete(name = "Cell")
+```
+
+```{r}
+gg <- df %>% 
+  dist(method = "maximum") %>% 
+  hclust(method = "average") 
+
+xpos <- gg$labels %>% as.numeric 
+cols2 <- env[xpos%>% match(1:72)]
+shps2 <- env1[xpos%>% match(1:72)] %>% as.character
+shps2[is.na(shps2)] <- ""
+col_tmp <- data.frame(x = xpos, y = -.00003, col = cols2, shape = shps2)
+
+gg %>% 
+  as.dendrogram() %>% 
+  dendro_data %>% 
+  segment %>% 
+  ggplot() +
+  geom_segment(aes(x=x, y=y, xend=xend, yend=yend)) +
+  geom_point(data = col_tmp, aes(x, y, color = col, shape = shape), size = .9) +
+  theme_dendro() +
+  scale_color_viridis_d(name = "Type") +
+  scale_shape_discrete(name = "Cell")
+```
+
+## Bootstrap
+```{r}
+gg2 <- df %>% 
+  t %>% 
+  pvclust(
+    nboot = 50,
+    method.dist = "maximum",
+    method.hclust = "average",
+    parallel = T)
+
+gg2$hclust$labels <- env
+
+gg2 %>% 
+  plot(cex = .5)
+```
+
+
+```{r}
+gg3 <- df %>% 
+  t %>% 
+  pvclust(
+    nboot = 50,
+    method.dist = "binary",
+    method.hclust = "average",
+    parallel = T)
+
+gg3$hclust$labels <- env
+
+plot(gg3)
+```
+
+## Conclusions
+In general, hierarchical methods can not suit this data well. It could be improved using different de-noizing techniques, or methods for dimension reduction.
+
+Let's make some meaningful plot with cluster viz:
+
+```{r}
+gg4 <- df %>% 
+  apply(2, scale) %>% 
+  prcomp
+
+gr <- gg %>% cutree(5) %>% as.character
+
+env1 <- as.character(env1)
+env1[is.na(env1)] <- ""
+
+gg5 <- gg4[["x"]] %>% 
+  ggplot(aes(PC1, PC2)) +
+  geom_point(aes(color = gr, shape = env)) +
+  theme_void()
+
+ggplotly(gg5)
+```
+
+OK, at least we can see  there probably that segregation happens above - on 4 not really much different clusters with a gradient.
