@@ -1,0 +1,295 @@
+---
+title: "HW2"
+author: "D.Smutin"
+date: "2024-04-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(base.dir = "~/bioinformatics/ITMO/statistics/multivar/HW3")
+
+library(tidyverse)
+library(plotly)
+library(vegan)
+library(readxl)
+set.seed(1)
+```
+
+# Homework 3 by Smutin Daniil
+
+## Prepare data
+```{r}
+df <- read_xlsx("Sleepy lizard.xlsx")
+
+hem <- df %>% 
+  dplyr::select("Tot_WBC", "Het_ABS", "Lym_ABS", 
+                "H:L Ratio", "Mon_ABS", "OthG_ABS")
+
+env <- df[,4:7]
+
+env$Treatment <- c("normal", "modified")[env$Treatment %>% match(1:2)]
+
+env$Habitat <- c("normal", "swale plantings", "fields with crops", "under fallow")[env$Habitat %>% match(1:4)]
+
+env$`Landscape ID` <- c("LS1", "LS2", "LS3"
+)[env$`Landscape ID` %>% match(unique(env$`Landscape ID`))]
+```
+
+## Normalizing data
+```{r}
+hem %>% 
+  as.data.frame %>% 
+  pivot_longer(cols = 1:6) %>% 
+  ggplot(aes(name, value)) +
+  geom_boxplot(outliers = F) +
+  geom_jitter(size = .1) +
+  theme_minimal()
+```
+
+OK, standardize data and center it
+```{r}
+center <- function(x) (x - mean(x)) #/ sd(x)
+log10_1 <- function(x) log10(x+1)
+
+hem <- hem %>% 
+  apply(2, log10_1) %>% 
+  #apply(2, scale) %>% 
+  apply(1, center) %>% 
+  apply(1, center) %>% 
+  as.data.frame()
+
+hem %>% 
+  pivot_longer(cols = 1:6) %>% 
+  ggplot(aes(y = value)) +
+  geom_boxplot(outliers = F, aes(x = 0), width = .5) +
+  geom_density() +
+  facet_grid(~name, scales = "free") +
+  theme_minimal()
+```
+
+Not totally normal distributions, but near them
+
+## Removing known batch using LBSI
+```{r}
+batch <- df$LBSI %>% center
+
+## measuring its influence
+model_batch <- glm(
+  batch ~
+    hem$Tot_WBC + hem$Het_ABS + hem$Lym_ABS + 
+    hem$`H:L Ratio` + hem$Mon_ABS + hem$OthG_ABS
+)
+
+plot(model_batch)
+```
+
+14, 81 and 85 ID is marked as outliers. Check it later
+
+## Viz
+Full:
+```{r}
+hem %>% 
+  cbind(env) %>% 
+  cbind(batch) %>% 
+  pivot_longer(cols = 1:6) %>% 
+  mutate(value = value) %>% 
+  ggplot(mapping = aes("", value)) +
+  geom_boxplot(aes(fill = Treatment), outliers = F) +
+  geom_jitter(aes(color = batch), size = .2, alpha = .5) +
+  theme_minimal() +
+  facet_wrap(~name, scales = "free") +
+  scale_color_viridis_c()
+```
+
+3 out of 6 categories seems to differ. In contrast, without performing double-centralization, 3-4 categories varied.
+
+Is batch equal?
+```{r}
+env %>% 
+  cbind(batch) %>% 
+  ggplot(mapping = aes(Treatment, batch)) +
+  geom_violin(draw_quantiles = c(0.25, 0.5, 0.75)) +
+  theme_minimal()
+```
+
+OK, the batch is nearly equal, but can be reduced. I choose MANOVA approach for predict.
+First of all, let's remove outliers
+
+## PCoA
+```{r}
+df_pcoa <- hem %>% 
+  prcomp()
+plot(df_pcoa)
+```
+OK, not bad distribution
+
+```{r}
+gg <- df_pcoa[["x"]] %>% 
+  cbind(env) %>% 
+  mutate (LID = as.character(`Landscape ID`)) %>% 
+  mutate(HBT = as.character(Habitat)) %>% 
+  ggplot(aes(PC1, PC2, color = LID, shape = HBT, text = paste0("ID: ", 1:122))) +
+  facet_grid(~Treatment) +
+  geom_point() +
+  theme_minimal()
+
+ggplotly(gg)
+```
+
+Without logarithmization (with usage of only the centering approach), the variance of two groups become unequal
+
+```{r, include=F}
+#filtered <- c(13,21)
+
+dfF <- hem %>% 
+  cbind(env) %>% 
+  cbind(batch) %>% 
+  mutate(Treatment <- as.factor(Treatment))
+
+#dfF <- dfF[-filtered,]
+
+df_pcoa <- dfF[,1:6] %>% 
+  prcomp()
+plot(df_pcoa)
+```
+
+```{r}
+gg <- df_pcoa[["x"]] %>% 
+  cbind(env) %>% 
+  cbind(batch) %>% 
+  mutate (LID = as.character(`Landscape ID`)) %>% 
+  mutate(HBT = as.character(Habitat)) %>% 
+  ggplot(aes(PC1, PC2, color = batch, shape = Treatment, text = paste0("ID: ", 1:122))) +
+  #facet_grid(~Treatment) +
+  scale_color_viridis_c(name = "LBSI") +
+  geom_point(size = 1, alpha = .7) +
+  theme_minimal()
+
+ggplotly(gg)
+```
+
+OK. Seems like lizards from unmodified areas have a bigger spread without row-wise standartization. With this procedure, nothing is related to their groupping. Also, there is ~no groupping or gradient according to LBSI
+
+### Group variance
+```{r}
+df_PCO <-dfF[,1:6] %>% 
+  vegdist(method  = "euclidean") %>% 
+  betadisper(dfF$Treatment)
+plot(df_PCO)
+```
+
+
+```{r}
+anova(df_PCO)
+```
+
+Groups residuals are equal now (with scaling with different datawizard package functions it was not true)
+
+### perMANOVA
+```{r}
+df_adonis <- adonis2(hem ~ dfF$Treatment*batch, method = "euclidean")
+df_adonis
+```
+
+The difference is significant. But what what exactly is the reason of the differences?
+
+### GLM
+```{r}
+dfF$target <- as.factor(dfF$Treatment)
+df_glm <- glm(data = dfF,
+              formula = target ~
+                (Tot_WBC + Het_ABS + Lym_ABS + 
+                `H:L Ratio` + Mon_ABS + OthG_ABS)*batch,
+              family = "binomial")
+
+summary(df_glm)
+```
+
+IDK why is it broken on OthG var
+
+## Habitats
+### Group variance
+```{r}
+dfH <- dfF %>% subset(Treatment == 'modified')
+
+df_PCO <- dfH[,1:6] %>% 
+  vegdist(method  = "euclidean") %>% 
+  betadisper(dfH$Habitat)
+plot(df_PCO)
+```
+
+
+```{r}
+anova(df_PCO)
+```
+
+Groups residuals are equal now (with scaling with different datawizard package functions it was not true)
+
+### perMANOVA: habitats
+```{r}
+df_adonis <- adonis2(dfH[,1:6] ~ dfH$Habitat*dfH$batch, method = "euclidean")
+df_adonis
+```
+
+The difference is not significant across different habitats.
+
+### perMANOVA: connectivity
+```{r}
+df_adonis <- adonis2(dfH[,1:6] ~ dfH$Connectivity*dfH$batch, method = "euclidean")
+df_adonis
+```
+
+The difference is also not significant
+
+### perMANOVA: connectivity and habitat
+```{r}
+df_adonis <- adonis2(dfH[,1:6] ~ dfH$Connectivity*dfH$Habitat*dfH$batch, method = "euclidean")
+df_adonis
+```
+
+Also, no visible relations. It might be better if I somehow balance variables, but not in now.
+
+### GLM?
+```{r}
+dfH$target <- as.factor(paste(dfH$Habitat, dfH$Connectivity))
+df_glm <- glm(data = dfH,
+              formula = target ~
+                (Tot_WBC + Het_ABS + Lym_ABS + 
+                `H:L Ratio` + Mon_ABS + OthG_ABS),
+              family = "binomial")
+
+summary(df_glm)
+```
+
+```{r}
+plot(df_glm)
+```
+
+Several outliers could be removed to improve both GLM and perMANOVA
+```{r}
+dfH <- dfH[!(rownames(dfH) %in% c(70, 91, 96, 119)),]
+
+df_glm <- glm(data = dfH,
+              formula = target ~
+                (Tot_WBC + Het_ABS + Lym_ABS + 
+                `H:L Ratio` + Mon_ABS + OthG_ABS),
+              family = "binomial")
+
+plot(df_glm)
+```
+
+```{r}
+df_adonis <- adonis2(dfH[,1:6] ~ dfH$Connectivity*dfH$Habitat*dfH$batch, method = "euclidean")
+df_adonis
+```
+
+Still, no connection using AOV, so GLM might have a noisy features for the prediction.
+
+# Answers
+## Task 1
+a) Yes
+b) No
+c) No
+## Task 2
+d) No
