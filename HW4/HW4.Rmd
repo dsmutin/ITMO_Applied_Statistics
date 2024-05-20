@@ -1,0 +1,439 @@
+---
+title: "HW2"
+author: "D.Smutin"
+date: "2024-04-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(base.dir = "~/bioinformatics/ITMO/statistics/multivar/HW4")
+
+library(tidyverse)
+library(vegan)
+library(ggpubr)
+library(viridis)
+library(plotly)
+#library(ggbeeswarm)
+library(ggvegan)
+library(readxl)
+library(corrplot)
+#library(heatmap3)
+library(AppliedPredictiveModeling)
+library(caret)
+library(factoextra)
+library(mixOmics)
+
+transparentTheme(trans = .4)
+
+set.seed(1)
+```
+
+# Homework 4 by Smutin Daniil
+
+## Prepare data
+```{r}
+taxa <- read_xls("Grazing_Magierowski_et_al_2015.xls", sheet = 1)[,1]
+fauna <- read_xls("Grazing_Magierowski_et_al_2015.xls", sheet = 2)
+env <- read_xls("Grazing_Magierowski_et_al_2015.xls", sheet = 3)
+coord <- read_xls("Grazing_Magierowski_et_al_2015.xls", sheet = 4)
+raw <- read_xls("Grazing_Magierowski_et_al_2015.xls", sheet = 5)
+```
+
+# Fast EDA
+```{r}
+env %>% summary
+```
+
+## Feature connections
+```{r}
+env <- env %>% 
+  mutate_if(is.character, as.factor)
+
+featurePlot(x = env[,-c(1,10:17,18)], 
+            y = env$GrazingRank, 
+            plot = "box",
+            scales = list(y = list(relation="free"),
+                          x = list(rot = 90)),  
+            layout = c(4,2), 
+            auto.key = list(columns = 3))
+
+featurePlot(x = env[,-c(1,1:9,18)], 
+            y = env$GrazingRank, 
+            plot = "box",
+            scales = list(y = list(relation="free"),
+                          x = list(rot = 90)),  
+            layout = c(4,2), 
+            auto.key = list(columns = 3))
+```
+
+We see several outliers in medium category and one in severe. To sum up, there are a lot of correllated features with grazing, including some chemical parameters, temperature, conductivity, regulation.
+
+So I can assume that they are under the 
+
+## Geography
+```{r}
+gg <- env %>%
+  left_join(coord,by = "SITE") %>% 
+  ggplot(aes(lon, lat, color = GrazingRank, text = SITE)) + 
+  geom_point() +
+  theme_minimal() +
+  scale_color_viridis_d("Grazing level")
+
+ggplotly(gg)
+```
+
+Places with different grazing levels are not equally distributed.
+
+# Deal with amounts
+```{r}
+gg <- fauna %>% 
+  pivot_longer(cols = -1) %>% 
+  mutate(value = value %>% as.numeric()) %>% 
+  ggplot(aes(y = SITE, value)) +
+  geom_violin(show.legend = F, aes(fill = SITE)) +
+  geom_jitter(show.legend = F, aes(color = name, text = name)) +
+  theme_minimal()
+
+ggplotly(gg) %>%
+  style(showlegend = FALSE)
+```
+
+## Adjust values using log10
+```{r}
+normalize <- function(x, na.rm = TRUE) {
+  #return((x- min(x)) /(max(x)-min(x)))
+  MX <- min(x)
+  x <- log10(x+1-MX)
+  #x - mean(x)
+}
+
+fauna_norm <- fauna
+fauna_norm[,-1] <- fauna[,-1] %>% 
+  apply(2, normalize) %>% 
+  apply(2, as.numeric)
+
+fauna_norm[is.na(fauna_norm)] <- 0
+
+gg <- fauna_norm %>% 
+  pivot_longer(cols = -1) %>% 
+  mutate(value = value %>% as.numeric()) %>% 
+  ggplot(aes(y = SITE, value)) +
+  geom_violin(show.legend = F, aes(fill = SITE)) +
+  geom_jitter(show.legend = F, aes(color = name, text = name), size = .2, alpha = .2) +
+  theme_minimal()
+
+ggplotly(gg) %>%
+  style(showlegend = FALSE)
+```
+OK, now much better.
+
+# Diversity
+OK, let's calculate differences between species based on diversity.
+```{r}
+c1 <- env$GrazingRank
+c1 <- c1 %>% match(unique(c1))
+c1 <- viridis(length(unique(c1)))[c1]
+
+fauna %>% 
+  column_to_rownames("SITE") %>% 
+  vegdist(method = "bray") %>% 
+  as.matrix() %>% 
+  heatmap(ColSideColors = c1)
+```
+
+Bray-Curtis beta-diversity is not correlated highly with grazing. So, move on
+
+#NMDS
+```{r}
+fauna_norm <- fauna_norm %>% 
+  column_to_rownames("SITE")
+
+NMDS <- fauna_norm %>% 
+  metaMDS(k = 2, dist = "bray")
+```
+
+```{r}
+stressplot(NMDS)
+```
+
+## Adding environmental parameters
+```{r}
+ef <- envfit(NMDS, env %>% left_join(coord, by = "SITE"), na.rm = T)
+ef$vectors %>% print
+cat("##################################\n")
+ef$factors %>% print
+```
+
+A significant fit to GrazingRank, as well as catching influence of Abstraction, Regulation, Conductivity and some other factors.
+
+
+```{r}
+NMDS_sm <- data.frame(env %>% left_join(coord, by = "SITE"), scores(NMDS, display = "sites"))
+
+NMDS_sm[,-1] %>% 
+  mutate_if(is.character, as.factor) %>% 
+  mutate_if(is.factor, as.numeric) %>% 
+  cor(use='complete.obs', method = "spearman") %>% 
+  corrplot(tl.cex = .5, order = 'FPC')
+```
+
+If the 1st NMDS component have a lot of factors which can describe it, 2nd have not such a strong correllations - only with Average_shading. So, 1st could be described by Grazing Rank and correlated features. while 2nd by different features complex, main of them are total alkalinity, average shading and longitude.
+
+```{r}
+NMDS_ef <- fortify(ef)
+
+fortify_ordisurf <- function(model) {
+  xy <- expand.grid(x = model$grid$x, y = model$grid$y)
+  xyz <- cbind(xy, c(model$grid$z))
+  names(xyz) <- c("x", "y", "z")
+  return(na.omit(xyz))
+}
+
+fortify_ordisurf <- function(model) {
+  xy <- expand.grid(x = model$grid$x, y = model$grid$y)
+  xyz <- cbind(xy, c(model$grid$z))
+  names(xyz) <- c("x", "y", "z")
+  return(na.omit(xyz))
+}
+
+osf <- function(var) {
+  env <- env %>% left_join(coord, by = "SITE")
+  var_mn <- env[,var] %>% unlist %>% as.factor %>% as.numeric 
+  ordisurf(NMDS, var_mn, method = "REML", main = var) %>% 
+    fortify_ordisurf()
+}
+
+NMDS_os_GR <- osf("GrazingRank")
+NMDS_os_Ab <- osf("Abstraction")
+NMDS_os_Rg <- osf("Regulation")
+NMDS_os_At <- osf("Alkalinity Total (mg CaCO3/L)")
+NMDS_os_As <- osf("Average % shading")
+NMDS_os_lon <- osf("lon")
+```
+
+```{r}
+gg <- ggplot() +
+  geom_point(data = NMDS_sm, 
+             aes(x = NMDS1, y = NMDS2, text = 1:27, shape = GrazingRank)) +
+  stat_contour(data = NMDS_os_lon, aes(x = x, y = y, z = z, colour = ..level..)) +
+  geom_segment(data = NMDS_ef[41:43,], linewidth = 0.25,
+               aes(x = 0, xend = NMDS1, y = 0, yend = NMDS2, text = label),
+               color = c("cadetblue", "darkgreen","darkred"),
+               arrow = arrow(length = unit(0.25, "cm"))) +
+  labs(x = "NMDS1", y = "NMDS2") +
+  theme_minimal() +
+  scale_shape_discrete(name = "Grazing Rank") +
+  scale_color_viridis("longtitude")
+
+ggplotly(gg)
+```
+
+OK! now we really now what to find on PCA and CCA
+
+# PCoA
+```{r}
+center <- function(x) (x - mean(x))/sd(x)
+# remove 0 columns
+fauna_norm <- fauna_norm[, apply(fauna_norm, 2, mean) > 0]
+
+res.pca <- fauna_norm %>% 
+  #apply(2,center) %>% 
+  prcomp()
+groups <- env$GrazingRank
+gg <- fviz_pca_ind(res.pca,axes =   c(1,2),
+             col.ind = groups, # color by groups
+             palette = c("#00AFBB",  "#FC4E07", "yellow"),
+             addEllipses = TRUE, # Concentration ellipses
+             ellipse.type = "confidence",
+             legend.title = "Groups",
+             repel = TRUE
+)
+
+ggplotly(gg)
+```
+
+Very low % of the explained data, but as on NMDS we can see grouping by grazing level.
+
+# CA
+```{r}
+df_ca <- cca(fauna_norm)
+
+df_ca$CA$eig %>% 
+  as.data.frame() %>% 
+  rownames_to_column("CA") %>% 
+  mutate(CA = CA %>% str_remove("CA") %>% as.numeric()) %>% 
+  ggplot(aes(CA, .)) +
+  geom_col() +
+  ylab("inertia") +
+  theme_minimal()
+```
+
+```{r}
+CA_site <- df_ca$CA$u[,1:2] %>% cbind(env) %>% cbind(coord[,-1])
+CA_sp <- df_ca$CA$v[,1:2] %>%
+  as.data.frame() %>% rownames_to_column("sp")
+
+gg <- ggplot() +
+  geom_point(data = CA_sp, 
+             aes(CA1, CA2, text = sp),
+             shape = 3, size = .5) +
+  geom_point(data = CA_site, 
+             aes(CA1, CA2, text = SITE, 
+                 color = GrazingRank)) +
+  theme_minimal()
+  
+ggplotly(gg)
+```
+
+# CCA
+```{r}
+# remove NA from CCA
+env_full <- env %>% 
+  left_join(coord, by = "SITE") %>% 
+  select_if(~ !any(is.na(.)))
+
+df_cca <- cca(fauna_norm ~ .,
+              data = env_full[,-1]) 
+
+df_cca$CA$eig %>% 
+  as.data.frame() %>% 
+  rownames_to_column("CA") %>% 
+  mutate(CA = CA %>% str_remove("CA") %>% as.numeric()) %>% 
+  ggplot(aes(CA, .)) +
+  geom_col() +
+  ylab("inertia") +
+  theme_minimal()
+```
+
+
+```{r}
+vif.cca(df_cca) %>% 
+  as.data.frame() %>% 
+  rownames_to_column("tp") %>% 
+  mutate(tp = fct_reorder(tp, ., .desc = T) ) %>% 
+  ggplot() +
+  geom_col(aes(log10(.+1), tp), fill = "blue") +
+  theme_minimal() + ylab("") + xlab("log10 of variance inflation factor")
+```
+
+Let's remove identical features with low fit and re-trim the model
+
+```{r}
+env_full_model <- env_full[,-c(1,4,12:13)]
+
+df_cca <- cca(fauna_norm ~ .,
+              data = env_full_model) %>% 
+  ordistep
+
+df_cca
+```
+
+~70% of unconstrained inertia is high
+
+```{r}
+df_cca$CA$eig %>% 
+  as.data.frame() %>% 
+  rownames_to_column("CA") %>% 
+  mutate(CA = CA %>% str_remove("CA") %>% as.numeric()) %>% 
+  ggplot(aes(CA, .)) +
+  geom_col() +
+  ylab("inertia") +
+  theme_minimal()
+```
+
+```{r}
+vif.cca(df_cca) %>% 
+  as.data.frame() %>% 
+  rownames_to_column("tp") %>% 
+  mutate(tp = fct_reorder(tp, ., .desc = T) ) %>% 
+  ggplot() +
+  geom_col(aes(log10(.+1), tp), fill = "blue") +
+  theme_minimal() + ylab("") + xlab("log10 of variance inflation factor")
+```
+
+
+```{r}
+intersetcor(df_cca) %>% 
+  as.data.frame() %>% 
+  rownames_to_column("tp") %>% 
+  mutate(tp = fct_reorder(tp, CCA1, .desc = T) ) %>% 
+  pivot_longer(cols = -1) %>% 
+  ggplot() +
+  geom_boxplot(aes(value, tp), color = "blue") +
+  theme_minimal() + ylab("") + xlab("interset correllation")
+```
+
+```{r}
+intersetcor(df_cca) %>% 
+  as.data.frame() %>% 
+  rownames_to_column("tp") %>% 
+  mutate(tp = fct_reorder(tp, CCA1, .desc = T) ) %>% 
+  pivot_longer(cols = -1) %>% 
+  ggplot() +
+  geom_col(aes(value, tp), fill = "blue") +
+  facet_grid(~name) +
+  theme_minimal(base_size = 7) + ylab("") + xlab("interset correllation")
+```
+
+```{r}
+anova(df_cca, type = "term")
+```
+
+Well-fitting model)
+
+```{r}
+df_cca %>% 
+  plot(scaling = "sites")
+```
+
+```{r}
+df_cca %>% 
+  plot(scaling = 2, display = c("species", "cn"))
+```
+
+Main influencing features seems to be temperature, regulation, longtitude and grazing.
+
+# sPLS-DA for grazing
+```{r}
+df_splsda <- fauna_norm %>% splsda(env$GrazingRank %>% as.factor)
+
+plotIndiv(df_splsda)
+```
+
+sPLS-DA predict <16% of all differences explanations related to grazing
+
+#GLMs
+
+Last: who are the best indicators for grazing?
+
+Simplest model - calculate univariate regressions between grazing and amounts; as a fit let's use R2 and PR(z>0)
+
+```{r}
+X <- env$GrazingRank %>% ordered
+
+GR_fit <- function(Y) {
+  tmp <- glm(X~Y, family = "binomial")
+  tmp2 <- tmp %>% summary
+  a <- with(tmp, 1 - deviance/null.deviance)
+  b <- tmp2[["coefficients"]][2,"Pr(>|z|)"]
+  
+  return(c(a,b))
+}
+
+R2 <- fauna_norm %>% 
+  apply(2, GR_fit) %>% 
+  as.data.frame %>% t %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sp")
+
+gg <- R2 %>% 
+  ggplot(aes(V1, -V2, text = sp, color = V1)) +
+  geom_point() +
+  theme_minimal() +
+  xlab("R2") + ylab("-Pr(|z|>0)")
+
+ggplotly(gg)
+```
+
+There are a few fitted species, but overall R2 value is pretty low - < 0.25. So, like by CCA, it is not the major factor, but one of influencing, in complex with other factors.
